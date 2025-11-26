@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 
@@ -65,15 +66,22 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "You do not have permission to upload a thumbnail for this video", nil)
 		return
 	}
-	// Store the thumbnail in the in-memory map
-	videoThumbnails[videoID] = thumbnail{
-		mediaType: mediaType,
-		data:      imageData,
-	}
+
+	// Convert image data to a base64-encoded string
+	imageStr := base64.StdEncoding.EncodeToString(imageData)
+
+	// Create a data URL for the thumbnail
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, imageStr)
+
+	// // Store the thumbnail in the in-memory map
+	// videoThumbnails[videoID] = thumbnail{
+	// 	mediaType: mediaType,
+	// 	data:      imageData,
+	// }
 
 	// Update the video's thumbnail URL in the database
-	updatedTNUrl := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID.String())
-	videoMeta.ThumbnailURL = &updatedTNUrl
+	// updatedTNUrl := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID.String())
+	videoMeta.ThumbnailURL = &dataURL
 	err = cfg.db.UpdateVideo(videoMeta)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video thumbnail URL", err)

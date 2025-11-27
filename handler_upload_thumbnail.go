@@ -1,9 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -46,13 +52,20 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	// Extract media type from the uploaded file header
 	mediaType := header.Header.Get("Content-Type")
 
-	// Read image data into a byte slice
-	imageData := make([]byte, header.Size)
-	_, err = file.Read(imageData)
+	// Validate media type - Only accept images (jpeg, png)
+	mimeType, _, err := mime.ParseMediaType(mediaType)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to read file data", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid media type", err)
 		return
 	}
+
+	if mimeType != "image/jpeg" && mimeType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Unsupported media type. Only JPEG and PNG are allowed.", nil)
+		return
+	}
+
+	// We'll stream the uploaded file directly to disk instead of reading it all into memory.
+	// This avoids using a []byte as an io.Reader and is more memory efficient for larger files.
 
 	// Retrieve video metadata
 	videoMeta, err := cfg.db.GetVideo(videoID)
@@ -67,21 +80,37 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Convert image data to a base64-encoded string
-	imageStr := base64.StdEncoding.EncodeToString(imageData)
+	// Create thumbnail filepath, ready to store in "assets" directory
 
-	// Create a data URL for the thumbnail
-	dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, imageStr)
+	// Fetch file extension from media type
+	thumbnailFileExt := mediaType[strings.Index(mediaType, "/")+1:]
 
-	// // Store the thumbnail in the in-memory map
-	// videoThumbnails[videoID] = thumbnail{
-	// 	mediaType: mediaType,
-	// 	data:      imageData,
-	// }
+	// Gnerate a unique filename for the thumbnail
+	key := make([]byte, 32)
+	rand.Read(key)
+	thumbnailFileName := fmt.Sprintf("%s.%s", base64.RawURLEncoding.EncodeToString(key), thumbnailFileExt)
 
-	// Update the video's thumbnail URL in the database
-	// updatedTNUrl := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID.String())
-	videoMeta.ThumbnailURL = &dataURL
+	// Join with assets root to get full path
+	thumbnailPath := filepath.Join(cfg.assetsRoot, thumbnailFileName)
+
+	// Save the thumbnail file to the assets directory
+	tnFile, err := os.Create(thumbnailPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create thumbnail file", err)
+		return
+	}
+	defer tnFile.Close()
+
+	if _, err := io.Copy(tnFile, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to save thumbnail file", err)
+		return
+	}
+
+	// Create URL for the thumbnail
+	tnURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, thumbnailFileName)
+
+	videoMeta.ThumbnailURL = &tnURL
+
 	err = cfg.db.UpdateVideo(videoMeta)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video thumbnail URL", err)

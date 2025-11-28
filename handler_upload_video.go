@@ -17,124 +17,122 @@ import (
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
-	// Set upload size limit
+	// Limit upload size
 	const maxUpload = 10 << 30 // 1 GB
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
 
-	// Extract video ID from URL path
-	videoIDString := r.PathValue("videoID")
-	videoID, err := uuid.Parse(videoIDString)
+	// Parse video ID from path
+	videoIDStr := r.PathValue("videoID")
+	videoID, err := uuid.Parse(videoIDStr)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid ID", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid video ID", err)
 		return
 	}
 
-	// Authenticate the user via JWT
+	// Authenticate
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
+		respondWithError(w, http.StatusUnauthorized, "Missing JWT", err)
 		return
 	}
-
-	// Validate JWT and get user ID
 	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
+		respondWithError(w, http.StatusUnauthorized, "Invalid JWT", err)
 		return
 	}
 
-	// Retrieve video metadata
+	// Retrieve metadata and check ownership
 	videoMeta, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to retrieve video metadata", err)
 		return
 	}
-
-	// Check if the authenticated user is the owner of the video
+	if videoMeta.ID == uuid.Nil {
+		respondWithError(w, http.StatusNotFound, "Video not found", nil)
+		return
+	}
 	if videoMeta.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "You do not have permission to upload a thumbnail for this video", nil)
+		respondWithError(w, http.StatusForbidden, "You don't own this video", nil)
 		return
 	}
 
-	// Extract the file from form data - "video" should match the HTML form input name
+	// Get uploaded file
 	file, header, err := r.FormFile("video")
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
+		respondWithError(w, http.StatusBadRequest, "Unable to parse uploaded file", err)
 		return
 	}
 	defer file.Close()
 
-	// Extract media type from the uploaded file header
 	mediaType := header.Header.Get("Content-Type")
-
-	// Validate media type - Only accept videos (mp4)
 	mimeType, _, err := mime.ParseMediaType(mediaType)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid media type", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
+		return
+	}
+	if !strings.HasPrefix(mimeType, "video/") {
+		respondWithError(w, http.StatusBadRequest, "Unsupported media type", nil)
 		return
 	}
 
-	if mimeType != "video/mp4" {
-		respondWithError(w, http.StatusBadRequest, "Unsupported media type. Only MP4 videos are allowed.", nil)
-		return
-	}
-
-	// Store video to temp file on disk
-	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
+	// Save to temp file then run ffprobe-based helper
+	tmp, err := os.CreateTemp("", "tubely-upload-*.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to create temp file", err)
 		return
 	}
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
 
-	// Copy uploaded file to temp file
-	_, err = io.Copy(tempFile, file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to save uploaded file", err)
+	if _, err := io.Copy(tmp, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to save upload", err)
 		return
 	}
 
-	// Reset file pointer to beginning of temp file
-	tempFile.Seek(0, io.SeekStart)
+	// Determine aspect and construct storage key
+	aspect, err := getVideoAspectRatio(tmp.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to determine video aspect", err)
+		return
+	}
 
-	// Fetch file extension from media type (I know, we only accept mp4 for now - but future proofing)
-	videolFileExt := mediaType[strings.Index(mediaType, "/")+1:]
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to rewind temp file", err)
+		return
+	}
 
-	// Generate a unique filename for the thumbnail
-	key := make([]byte, 32)
-	rand.Read(key)
-	videoFileName := fmt.Sprintf("%s.%s", base64.RawURLEncoding.EncodeToString(key), videolFileExt)
+	// determine extension from mime type
+	partsIdx := strings.Index(mimeType, "/")
+	ext := "mp4"
+	if partsIdx > -1 && partsIdx < len(mimeType)-1 {
+		ext = mimeType[partsIdx+1:]
+	}
 
-	fmt.Println("uploading video", videoID, "to S3 by user", userID)
+	var keyBytes [32]byte
+	if _, err := rand.Read(keyBytes[:]); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to generate key", err)
+		return
+	}
+	objectKey := fmt.Sprintf("%s/%s.%s", aspect, base64.RawURLEncoding.EncodeToString(keyBytes[:]), ext)
 
-	// Define S3 parmeters for upload
 	params := &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
-		Key:         &videoFileName,
-		Body:        tempFile,
-		ContentType: &mediaType,
+		Key:         &objectKey,
+		Body:        tmp,
+		ContentType: &mimeType,
 	}
 
-	// Upload video to S3
-	_, err = cfg.s3Client.PutObject(context.TODO(), params)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to upload video to S3", err)
+	if _, err := cfg.s3Client.PutObject(context.TODO(), params); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "S3 upload failed", err)
 		return
 	}
 
-	// Create URL for the video in S3 and update in database
-	vidURL := fmt.Sprintf("http://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoFileName)
-
-	videoMeta.VideoURL = &vidURL
-
-	err = cfg.db.UpdateVideo(videoMeta)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to update video URL", err)
+	url := fmt.Sprintf("http://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, objectKey)
+	videoMeta.VideoURL = &url
+	if err := cfg.db.UpdateVideo(videoMeta); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to update video metadata", err)
 		return
 	}
-
-	// Marshal and send the response
 
 	respondWithJSON(w, http.StatusOK, videoMeta)
 }

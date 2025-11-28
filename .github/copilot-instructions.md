@@ -51,6 +51,19 @@ Tubely is a video platform backend service (similar to a shorter-form video app)
 - **Expected tools**: ffmpeg (both `ffmpeg` and `ffprobe`) for video processing - must be in PATH
 - **Future**: S3 integration for video/thumbnail storage using CloudFront URLs
 
+### Video processing & ffprobe (important)
+
+- The code uses `ffprobe` to inspect uploaded videos and extract stream metadata (file: `video.go`). The correct ffprobe flag is `-print_format json -show_streams` (note the underscore — `-print_format`, not `-print-format`).
+- `getVideoAspectRatio(filePath)` runs ffprobe and then calls `parseVideoAspectFromJSON` to classify videos as `landscape`, `portrait`, or `other`. The parser checks (in order): `display_aspect_ratio`, `sample_aspect_ratio * (width/height)`, `coded_width/coded_height` and finally `width/height`.
+- When ffprobe fails (missing binary, corrupted file, or bad args), the helper captures stderr and returns a descriptive error — handler logs will include ffprobe's stderr to help debugging.
+- `handler_upload_video.go` saves uploads to a temporary file, inspects the aspect, then generates an S3 key using the aspect as a prefix (e.g. `landscape/<random-id>.mp4`) before uploading and saving the S3 URL in the DB.
+
+### Tests & CI notes
+
+- Unit tests covering aspect parsing live in `video_test.go` and validate the `parseVideoAspectFromJSON` logic (display/sample/coded/width+height cases) plus safeguards for invalid JSON.
+- There are tests that exercise `getVideoAspectRatio` behavior with missing files; note that any test that actually runs `ffprobe` will need ffprobe in PATH. CI may skip or fail ffprobe-dependent integration tests if ffprobe is not installed — prefer unit-testing `parseVideoAspectFromJSON` where possible.
+
+
 ## Critical Environment Variables
 All must be set (see `.env.example`):
 - `DB_PATH`: SQLite database file path

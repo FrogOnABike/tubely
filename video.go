@@ -86,6 +86,27 @@ type video struct {
 	} `json:"streams"`
 }
 
+// processVideoForFastStart uses ffmpeg to process the video file at filePath
+// so that it is optimized for fast start (i.e., the moov atom is at the beginning).
+// It returns the path to the processed file.
+func processVideoForFastStart(filePath string) (string, error) {
+	// Use ffmpeg to process the video for fast start
+	outputPath := filePath + ".processing"
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-movflags", "faststart", "-f", "mp4", "-c", "copy", outputPath)
+	var errOut bytes.Buffer
+	cmd.Stderr = &errOut
+	err := cmd.Run()
+	if err != nil {
+		// Include stderr content to make debugging easier (missing ffprobe, bad file, etc.)
+		stderr := strings.TrimSpace(errOut.String())
+		if stderr == "" {
+			return "", fmt.Errorf("ffprobe failed: %w", err)
+		}
+		return "", fmt.Errorf("ffprobe failed: %w: %s", err, stderr)
+	}
+	return outputPath, nil
+
+}
 func getVideoAspectRatio(filePath string) (string, error) {
 	// Use ffprobe to get video metadata
 	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)

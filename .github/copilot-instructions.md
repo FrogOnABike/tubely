@@ -74,6 +74,11 @@ All must be set (see `.env.example`):
 - `S3_BUCKET`, `S3_REGION`, `S3_CF_DISTRO`: AWS S3 configuration
 - `PORT`: Server port
 
+### S3 storage conventions (private buckets)
+
+- The app now stores video storage references in the DB using a canonical `bucket,key` string in `video_url` for private S3 buckets (e.g. `my-bucket,landscape/<uuid>.mp4`). This keeps the DB independent of region/host format and allows the server to generate presigned URLs on demand.
+- `dbVideoToSignedVideo` extracts `bucket` and `key` (supports `bucket,key`, host-style `https://<bucket>.s3.<region>.amazonaws.com/<key>`, and path-style `https://s3.amazonaws.com/<bucket>/<key>`), then generates a presigned URL using the configured S3 client.
+
 ## Development Workflow
 
 **Setup**:

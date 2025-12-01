@@ -89,6 +89,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Pre-process video to enable fast start
+	processedVideoPath, err := processVideoForFastStart(tmp.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to process video for fast start", err)
+		return
+	}
+	defer os.Remove(processedVideoPath)
+	tmp.Close() // close original temp file before re-opening processed file
+
+	// Re-open processed video file
+	tmp, err = os.Open(processedVideoPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open processed video file", err)
+		return
+	}
+	defer tmp.Close()
+
 	// Determine aspect and construct storage key
 	aspect, err := getVideoAspectRatio(tmp.Name())
 	if err != nil {
@@ -96,10 +113,10 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to rewind temp file", err)
-		return
-	}
+	// if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+	// 	respondWithError(w, http.StatusInternalServerError, "Unable to rewind temp file", err)
+	// 	return
+	// }
 
 	// determine extension from mime type
 	partsIdx := strings.Index(mimeType, "/")
@@ -127,10 +144,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	url := fmt.Sprintf("http://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, objectKey)
+	// url := fmt.Sprintf("http://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, objectKey)
+	// Update video metadata in DB with new details (bucket and key)
+	url := strings.Join([]string{cfg.s3Bucket, objectKey}, ",")
 	videoMeta.VideoURL = &url
 	if err := cfg.db.UpdateVideo(videoMeta); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video metadata", err)
+		return
+	}
+
+	// Fetch presigned metadata to return to client
+	videoMeta, err = cfg.dbVideoToSignedVideo(videoMeta)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to generate presigned URL", err)
 		return
 	}
 

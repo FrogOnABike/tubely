@@ -144,19 +144,11 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// url := fmt.Sprintf("http://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, objectKey)
-	// Update video metadata in DB with new details (bucket and key)
-	url := strings.Join([]string{cfg.s3Bucket, objectKey}, ",")
+	// Update video metadata with Cloudfront URL
+	url := fmt.Sprintf("https://%s/%s", cfg.s3CfDistribution, objectKey)
 	videoMeta.VideoURL = &url
 	if err := cfg.db.UpdateVideo(videoMeta); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video metadata", err)
-		return
-	}
-
-	// Fetch presigned metadata to return to client
-	videoMeta, err = cfg.dbVideoToSignedVideo(videoMeta)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to generate presigned URL", err)
 		return
 	}
 
